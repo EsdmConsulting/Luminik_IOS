@@ -17,6 +17,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // If using a storyboard, the `window` property will automatically be initialized and attached to the scene.
         // This delegate does not imply the connecting scene or session are new (see `application:configurationForConnectingSceneSession` instead).
         guard let _ = (scene as? UIWindowScene) else { return }
+
+        // Igual que el splash de Android: si ya hay sesión guardada, entra directo al dashboard.
+        if let session = SessionStore.shared.current {
+            let branch = Branch(dto: BranchDTO(id: session.branchID, name: session.branchName))
+            window?.rootViewController = DashboardTabBarController(session: session, branch: branch)
+        }
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {

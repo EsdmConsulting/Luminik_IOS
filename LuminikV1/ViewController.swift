@@ -1,6 +1,8 @@
 import UIKit
 
-private enum LuminikStyle {
+/// Antes era `private`, pero también lo usan `DashboardViewController.swift` y
+/// `AppointmentScheduling.swift`; con `private` esos archivos no compilaban.
+enum LuminikStyle {
     static let blue = UIColor(red: 12 / 255, green: 70 / 255, blue: 151 / 255, alpha: 1)
     static let background = UIColor(red: 1, green: 248 / 255, blue: 1, alpha: 1)
     static let cardBackground = UIColor(red: 241 / 255, green: 238 / 255, blue: 242 / 255, alpha: 1)
@@ -13,24 +15,100 @@ private enum LuminikStyle {
 }
 
 struct Branch: Equatable, Sendable {
+    /// `id` de la sucursal en el servidor; es el `idSucursal` que pide el login.
+    let id: String
     let name: String
     let mark: String
     let subtitle: String?
 }
 
 final class ViewController: UIViewController {
-    private let branches = [
-        Branch(name: "VALLE ORIENTE", mark: "VO", subtitle: "GALERÍAS VALLE ORIENTE"),
-        Branch(name: "PASEO LA FE", mark: "PASEO | LA FE", subtitle: nil),
-        Branch(name: "PLAZA FIESTA", mark: "PLAZA\nFIESTA", subtitle: nil)
-    ]
+    private let service: LuminikServicing = LuminikAPI()
+    private var loadTask: Task<Void, Never>?
 
     private let scrollView = UIScrollView()
     private let stackView = UIStackView()
+    /// Vistas que dependen de la carga (tarjetas, spinner o error). Se reemplazan en cada carga.
+    private var dynamicViews: [UIView] = []
 
     override func viewDidLoad() {
         super.viewDidLoad()
         configureView()
+        loadBranches()
+    }
+
+    private func loadBranches() {
+        loadTask?.cancel()
+        showLoading()
+        loadTask = Task { [weak self, service] in
+            do {
+                let dtos = try await service.fetchBranches()
+                guard !Task.isCancelled else { return }
+                let branches = dtos
+                    .filter { !$0.id.isEmpty && !$0.name.isEmpty }
+                    .map(Branch.init(dto:))
+                self?.showBranches(branches)
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showFailure(error.localizedDescription)
+            }
+        }
+    }
+
+    private func replaceDynamicViews(with views: [UIView]) {
+        dynamicViews.forEach { $0.removeFromSuperview() }
+        dynamicViews = views
+        views.forEach { stackView.addArrangedSubview($0) }
+    }
+
+    private func showLoading() {
+        let spinner = UIActivityIndicatorView(style: .large)
+        spinner.startAnimating()
+        spinner.accessibilityLabel = "Cargando sucursales"
+        spinner.accessibilityIdentifier = "branches.loading"
+        replaceDynamicViews(with: [spinner])
+    }
+
+    private func showBranches(_ branches: [Branch]) {
+        guard !branches.isEmpty else {
+            showFailure("No hay sucursales disponibles por el momento.")
+            return
+        }
+        let cards: [UIView] = branches.map { branch in
+            let card = BranchCardControl(branch: branch)
+            card.addAction(UIAction { [weak self] _ in
+                self?.showLogin(for: branch)
+            }, for: .touchUpInside)
+            return card
+        }
+        replaceDynamicViews(with: cards)
+    }
+
+    private func showFailure(_ message: String) {
+        let label = UILabel()
+        label.text = message
+        label.font = LuminikStyle.serifFont(textStyle: .body)
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = .secondaryLabel
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        label.accessibilityIdentifier = "branches.error"
+
+        var configuration = UIButton.Configuration.filled()
+        configuration.title = "Reintentar"
+        configuration.baseBackgroundColor = LuminikStyle.blue
+        configuration.baseForegroundColor = .white
+        configuration.cornerStyle = .fixed
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 14, leading: 24, bottom: 14, trailing: 24)
+        let retry = UIButton(configuration: configuration)
+        retry.accessibilityIdentifier = "branches.retry"
+        retry.addAction(UIAction { [weak self] _ in
+            self?.loadBranches()
+        }, for: .touchUpInside)
+
+        replaceDynamicViews(with: [label, retry])
+        UIAccessibility.post(notification: .announcement, argument: message)
     }
 
     private func configureView() {
@@ -76,14 +154,6 @@ final class ViewController: UIViewController {
         stackView.addArrangedSubview(titleWrapper)
         stackView.setCustomSpacing(38, after: titleWrapper)
 
-        for branch in branches {
-            let card = BranchCardControl(branch: branch)
-            card.addAction(UIAction { [weak self] _ in
-                self?.showLogin(for: branch)
-            }, for: .touchUpInside)
-            stackView.addArrangedSubview(card)
-        }
-
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -97,7 +167,7 @@ final class ViewController: UIViewController {
     }
 
     private func showLogin(for branch: Branch) {
-        let loginViewController = LoginViewController(branch: branch, viewModel: LoginViewModel())
+        let loginViewController = LoginViewController(branch: branch, viewModel: LoginViewModel(branch: branch))
         loginViewController.modalPresentationStyle = .fullScreen
         present(loginViewController, animated: true)
     }
@@ -247,7 +317,7 @@ private final class LoginViewController: UIViewController {
         passwordField.textContentType = .password
         passwordField.returnKeyType = .go
         passwordField.accessibilityIdentifier = "login.password"
-        configureErrorLabel(passwordErrorLabel, text: "La contraseña debe tener al menos 8 caracteres.")
+        configureErrorLabel(passwordErrorLabel, text: "Ingresa tu contraseña.")
 
         let phoneGroup = FieldGroupView(title: "TELÉFONO", field: phoneField, errorLabel: phoneErrorLabel)
         let passwordGroup = FieldGroupView(title: "PASSWORD", field: passwordField, errorLabel: passwordErrorLabel)
@@ -360,15 +430,21 @@ private final class LoginViewController: UIViewController {
         case .idle, .loading:
             messageLabel.isHidden = true
         case .authenticated:
-            messageLabel.text = "Sesión iniciada correctamente en \(branch.name)."
-            messageLabel.textColor = .systemGreen
-            messageLabel.isHidden = false
-            UIAccessibility.post(notification: .announcement, argument: messageLabel.text)
+            messageLabel.isHidden = true
+            showDashboard()
         case let .failed(message):
             messageLabel.text = message
             messageLabel.textColor = .systemRed
             messageLabel.isHidden = false
             UIAccessibility.post(notification: .announcement, argument: message)
+        }
+    }
+
+    private func showDashboard() {
+        guard let session = viewModel.session, let window = view.window else { return }
+        let dashboard = DashboardTabBarController(session: session, branch: branch)
+        UIView.transition(with: window, duration: 0.35, options: .transitionCrossDissolve) {
+            window.rootViewController = dashboard
         }
     }
 
