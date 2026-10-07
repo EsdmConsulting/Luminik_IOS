@@ -61,7 +61,7 @@ final class DashboardTabBarController: UITabBarController {
     }
 
     private func configureTabs() {
-        let home = HomeViewController(session: session)
+        let home = HomeViewController(session: session, service: service)
         home.tabBarItem = UITabBarItem(title: "Inicio", image: UIImage(systemName: "house.fill"), tag: 0)
 
         let appointments = AppointmentsViewController(session: session, service: service)
@@ -147,9 +147,11 @@ private class DashboardContentViewController: UIViewController {
 
 private final class HomeViewController: DashboardContentViewController {
     private let session: UserSession
+    private let service: LuminikServicing
 
-    init(session: UserSession) {
+    init(session: UserSession, service: LuminikServicing) {
         self.session = session
+        self.service = service
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -180,8 +182,14 @@ private final class HomeViewController: DashboardContentViewController {
         shortcuts.axis = .horizontal
         shortcuts.distribution = .fillEqually
         shortcuts.spacing = 14
-        shortcuts.addArrangedSubview(makeShortcut(title: "MIS CONTRATOS", symbol: "list.clipboard"))
-        shortcuts.addArrangedSubview(makeShortcut(title: "HISTORIAL", symbol: "checklist"))
+        shortcuts.addArrangedSubview(makeShortcut(title: "MIS CONTRATOS", symbol: "list.clipboard", identifier: "dashboard.contracts") { [weak self] in
+            guard let self else { return }
+            self.presentFullScreen(ContractsViewController(session: self.session, service: self.service))
+        })
+        shortcuts.addArrangedSubview(makeShortcut(title: "HISTORIAL", symbol: "checklist", identifier: "dashboard.history") { [weak self] in
+            guard let self else { return }
+            self.presentFullScreen(HistoryViewController(session: self.session, service: self.service))
+        })
         contentStack.addArrangedSubview(shortcuts)
 
         let scheduleButton = UIButton(type: .system)
@@ -193,10 +201,20 @@ private final class HomeViewController: DashboardContentViewController {
         scheduleButton.titleLabel?.font = LuminikStyle.serifFont(textStyle: .title1)
         scheduleButton.backgroundColor = .black
         scheduleButton.accessibilityIdentifier = "dashboard.schedule"
+        scheduleButton.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let draft = AppointmentDraft(session: self.session, service: self.service)
+            self.presentFullScreen(ScheduleSelectionViewController(draft: draft))
+        }, for: .touchUpInside)
         contentStack.addArrangedSubview(scheduleButton)
     }
 
-    private func makeShortcut(title: String, symbol: String) -> UIButton {
+    private func presentFullScreen(_ controller: UIViewController) {
+        controller.modalPresentationStyle = .fullScreen
+        present(controller, animated: true)
+    }
+
+    private func makeShortcut(title: String, symbol: String, identifier: String, action: @escaping () -> Void) -> UIButton {
         let button = UIButton(type: .system)
         var configuration = UIButton.Configuration.plain()
         configuration.title = title
@@ -208,6 +226,8 @@ private final class HomeViewController: DashboardContentViewController {
         button.configuration = configuration
         button.tintColor = LuminikStyle.blue
         button.titleLabel?.font = LuminikStyle.serifFont(textStyle: .body)
+        button.accessibilityIdentifier = identifier
+        button.addAction(UIAction { _ in action() }, for: .touchUpInside)
         return button
     }
 }
@@ -299,7 +319,18 @@ private final class AppointmentsViewController: DashboardContentViewController {
         }, for: .valueChanged)
         scrollView.refreshControl = refreshControl
 
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appointmentsDidChange),
+            name: .luminikAppointmentsDidChange,
+            object: nil
+        )
+
         loadAppointments(showsSpinner: true)
+    }
+
+    @objc private func appointmentsDidChange() {
+        loadAppointments(showsSpinner: false)
     }
 
     private func loadAppointments(showsSpinner: Bool) {
@@ -320,7 +351,7 @@ private final class AppointmentsViewController: DashboardContentViewController {
                 )
                 guard !Task.isCancelled else { return }
                 self?.scrollView.refreshControl?.endRefreshing()
-                self?.showAppointments(quotes.map(AppointmentItem.init(quote:)))
+                self?.showAppointments(quotes)
             } catch is CancellationError {
                 return
             } catch {
@@ -336,14 +367,25 @@ private final class AppointmentsViewController: DashboardContentViewController {
         views.forEach { contentStack.addArrangedSubview($0) }
     }
 
-    private func showAppointments(_ appointments: [AppointmentItem]) {
-        guard !appointments.isEmpty else {
+    private func showAppointments(_ quotes: [Quote]) {
+        guard !quotes.isEmpty else {
             let label = makeSerifLabel(text: "Aún no tienes citas.", style: .title3, color: .secondaryLabel, alignment: .center)
             label.accessibilityIdentifier = "appointments.empty"
             replaceDynamicViews(with: [label])
             return
         }
-        replaceDynamicViews(with: appointments.map { AppointmentCardView(appointment: $0) })
+        replaceDynamicViews(with: quotes.map { quote in
+            let card = AppointmentCardView(appointment: AppointmentItem(quote: quote))
+            card.accessibilityIdentifier = "appointment.\(quote.id)"
+            card.addAction(UIAction { [weak self] _ in self?.openDetail(quote) }, for: .touchUpInside)
+            return card
+        })
+    }
+
+    private func openDetail(_ quote: Quote) {
+        let detail = AppointmentDetailViewController(quote: quote, session: session, service: service)
+        detail.modalPresentationStyle = .fullScreen
+        present(detail, animated: true)
     }
 
     private func showFailure(_ message: String) {
@@ -367,7 +409,7 @@ private final class AppointmentsViewController: DashboardContentViewController {
     }
 }
 
-private final class AppointmentCardView: UIView {
+private final class AppointmentCardView: UIControl {
     init(appointment: AppointmentItem) {
         super.init(frame: .zero)
         backgroundColor = LuminikStyle.blue
@@ -394,6 +436,7 @@ private final class AppointmentCardView: UIView {
 
         accessibilityLabel = "Cita. Fecha \(appointment.date). Hora \(appointment.time). Contrato \(appointment.contract)."
             + (appointment.isCancelled ? " Cancelada." : "")
+        accessibilityTraits = .button
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(greaterThanOrEqualToConstant: 150),

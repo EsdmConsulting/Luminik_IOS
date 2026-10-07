@@ -9,6 +9,16 @@ nonisolated enum LuminikEndpoint: String {
     case branches = "servicioListSuc.php"
     case login = "serviciosLogin.php"
     case quotes = "serviciosListCitas.php"
+    /// Mismo script para los contratos del cliente y para los "contratos de una cita".
+    case contracts = "serviciosContratosCliente.php"
+    case contractServices = "serviciosContratoServiMs.php"
+    case history = "servicioshistorialcitas.php"
+    case quoteServices = "serviciosCitasServis.php"
+    case cabins = "serviciosCabinas.php"
+    case availableDates = "serviciosFechasDisponible.php"
+    case availableHours = "serviciosHorarioaDisponible.php"
+    case cancelQuote = "servicioscancelacion.php"
+    case saveQuote = "serviciosguardarcita.php"
 }
 
 nonisolated enum LuminikAPIError: LocalizedError, Equatable {
@@ -45,6 +55,36 @@ nonisolated protocol LuminikServicing: Sendable {
     func login(branchID: String, phone: String, password: String) async throws -> LoginUser
     /// `serviciosListCitas.php`
     func fetchQuotes(branchID: String, clientID: String) async throws -> [Quote]
+    /// `serviciosContratosCliente.php` (idSucursal, idCliente)
+    func fetchContracts(branchID: String, clientID: String) async throws -> [Contract]
+    /// `serviciosContratoServiMs.php`; `contractTypeCode` es el `tipoC` (ver `ContractKind.serviceTypeCode`).
+    func fetchContractServices(
+        branchID: String,
+        contractTypeCode: String,
+        contractID: String,
+        clientID: String
+    ) async throws -> [ContractService]
+    /// `serviciosContratosCliente.php` con `idCita` (Android manda vacíos el resto de los campos).
+    func fetchQuoteContractServices(quoteID: String) async throws -> [QuoteContractService]
+    /// `servicioshistorialcitas.php`
+    func fetchHistory(branchID: String, clientID: String) async throws -> [Quote]
+    /// `serviciosCitasServis.php`
+    func fetchQuoteServices(quoteID: String) async throws -> [QuoteService]
+    /// `serviciosCabinas.php`
+    func fetchCabins(branchID: String) async throws -> [Cabin]
+    /// `serviciosFechasDisponible.php`; fechas en `dd-MM-yyyy`.
+    func fetchAvailableDates(_ request: AvailableDatesRequest) async throws -> [String]
+    /// `serviciosHorarioaDisponible.php`; `date` en `dd-MM-yyyy`.
+    func fetchAvailableHours(
+        cabinID: String,
+        branchID: String,
+        totalMinutes: Int,
+        date: String
+    ) async throws -> [String]
+    /// `servicioscancelacion.php`
+    func cancelQuote(quoteID: String, clientID: String, branchID: String, contractID: String) async throws
+    /// `serviciosguardarcita.php`
+    func saveQuote(_ request: SaveQuoteRequest) async throws
 }
 
 nonisolated struct LuminikAPI: LuminikServicing {
@@ -89,12 +129,167 @@ nonisolated struct LuminikAPI: LuminikServicing {
         return envelope.data ?? []
     }
 
+    func fetchContracts(branchID: String, clientID: String) async throws -> [Contract] {
+        let envelope: ContractsResponse = try await postRaw(
+            .contracts,
+            fields: [
+                ("idSucursal", branchID),
+                ("idCliente", clientID)
+            ]
+        )
+        return envelope.contracts
+    }
+
+    func fetchContractServices(
+        branchID: String,
+        contractTypeCode: String,
+        contractID: String,
+        clientID: String
+    ) async throws -> [ContractService] {
+        let envelope: LuminikEnvelope<[ContractService]> = try await post(
+            .contractServices,
+            fields: [
+                ("idSucursal", branchID),
+                ("tipoC", contractTypeCode),
+                ("idContrato", contractID),
+                ("idCliente", clientID)
+            ]
+        )
+        return (envelope.data ?? []).map { $0.with(contractID: contractID) }
+    }
+
+    func fetchQuoteContractServices(quoteID: String) async throws -> [QuoteContractService] {
+        let envelope: LuminikEnvelope<[QuoteContractService]> = try await post(
+            .contracts,
+            fields: [
+                ("idCita", quoteID),
+                ("folio", ""),
+                ("idClien", ""),
+                ("sucursal", ""),
+                ("idContrato", "")
+            ]
+        )
+        return envelope.data ?? []
+    }
+
+    func fetchHistory(branchID: String, clientID: String) async throws -> [Quote] {
+        let envelope: LuminikEnvelope<[Quote]> = try await post(
+            .history,
+            fields: [
+                ("idClien", clientID),
+                ("sucursal", branchID)
+            ]
+        )
+        return envelope.data ?? []
+    }
+
+    func fetchQuoteServices(quoteID: String) async throws -> [QuoteService] {
+        let envelope: LuminikEnvelope<[QuoteService]> = try await post(
+            .quoteServices,
+            fields: [("idCita", quoteID)]
+        )
+        return envelope.data ?? []
+    }
+
+    func fetchCabins(branchID: String) async throws -> [Cabin] {
+        let envelope: LuminikEnvelope<[Cabin]> = try await post(
+            .cabins,
+            fields: [("idSucursal", branchID)]
+        )
+        return envelope.data ?? []
+    }
+
+    func fetchAvailableDates(_ request: AvailableDatesRequest) async throws -> [String] {
+        let envelope: LuminikDatesEnvelope = try await postRaw(
+            .availableDates,
+            fields: [
+                ("idContrato", request.contractIDs.joined(separator: ",")),
+                ("tipoContr", request.contractTypeCodes.joined(separator: ",")),
+                ("pesoClient", request.clientWeight),
+                ("idCabina", request.cabinID),
+                ("idCliente", request.clientID),
+                ("clientid", request.clientID),
+                ("sucursal", request.branchID),
+                ("duracion", String(request.durationMinutes)),
+                ("tipcita", request.isValuation ? "1" : "0"),
+                ("servi", request.serviceIDs.joined(separator: ","))
+            ]
+        )
+        return envelope.dates
+    }
+
+    func fetchAvailableHours(
+        cabinID: String,
+        branchID: String,
+        totalMinutes: Int,
+        date: String
+    ) async throws -> [String] {
+        let envelope: LuminikEnvelope<[String]> = try await post(
+            .availableHours,
+            fields: [
+                ("idCabina", cabinID),
+                ("sucursal", branchID),
+                ("timeTotal", String(totalMinutes)),
+                ("fechaCita", date)
+            ]
+        )
+        return envelope.data ?? []
+    }
+
+    func cancelQuote(quoteID: String, clientID: String, branchID: String, contractID: String) async throws {
+        let envelope: LuminikEnvelope<EmptyPayload> = try await post(
+            .cancelQuote,
+            fields: [
+                ("idCita", quoteID),
+                ("idClient", clientID),
+                ("idSucursal", branchID),
+                ("idContra", contractID)
+            ]
+        )
+        // Android no revisa `Status` al cancelar; aquí solo se rechazan los códigos que
+        // la app de Android trata como error al guardar (0 y 2).
+        if envelope.status == 0 || envelope.status == 2 {
+            throw LuminikAPIError.rejected(message: envelope.message)
+        }
+    }
+
+    func saveQuote(_ request: SaveQuoteRequest) async throws {
+        let envelope: LuminikEnvelope<EmptyPayload> = try await post(
+            .saveQuote,
+            fields: [
+                ("idClien", request.clientID),
+                ("idContrato", request.contractIDs.joined(separator: ",")),
+                ("fechaCita", request.date),
+                ("horaCita", request.time),
+                ("title", request.notes),
+                ("sucursal", request.branchID),
+                ("tipo", request.contractTypeCodes.joined(separator: ",")),
+                ("tipoCita", request.isValuation ? "1" : "0"),
+                ("timeTotal", String(request.durationMinutes)),
+                ("numCabi", request.cabinID),
+                ("servi", request.serviceIDs.joined(separator: ","))
+            ]
+        )
+        // Android: `Status == 1` es éxito; 0 y 2 son error.
+        guard envelope.status == 1 else {
+            throw LuminikAPIError.rejected(message: envelope.message)
+        }
+    }
+
     // MARK: - Transport
 
     private func post<Payload: Decodable>(
         _ endpoint: LuminikEndpoint,
         fields: [(name: String, value: String)]?
     ) async throws -> LuminikEnvelope<Payload> {
+        try await postRaw(endpoint, fields: fields)
+    }
+
+    /// POST que decodifica directamente el tipo pedido (para respuestas con forma propia).
+    private func postRaw<Response: Decodable>(
+        _ endpoint: LuminikEndpoint,
+        fields: [(name: String, value: String)]?
+    ) async throws -> Response {
         var request = URLRequest(url: baseURL.appendingPathComponent(endpoint.rawValue))
         request.httpMethod = "POST"
         request.timeoutInterval = 30
@@ -133,7 +328,7 @@ nonisolated struct LuminikAPI: LuminikServicing {
         }
 
         do {
-            return try JSONDecoder().decode(LuminikEnvelope<Payload>.self, from: data)
+            return try JSONDecoder().decode(Response.self, from: data)
         } catch {
             throw LuminikAPIError.invalidResponse
         }
